@@ -9,10 +9,18 @@
 ![visitors](https://visitor-badge.laobi.icu/badge?page_id=jingyaogong/minimind)
 [![GitHub Repo stars](https://img.shields.io/github/stars/jingyaogong/minimind?style=social)](https://github.com/jingyaogong/minimind/stargazers)
 [![GitHub Code License](https://img.shields.io/github/license/jingyaogong/minimind)](LICENSE)
-[![GitHub last commit](https://img.shields.io/github/last-commit/jingyaogong/minimind)](https://github.com/jingyaogong/minimind/commits/master)
-[![GitHub pull request](https://img.shields.io/badge/PRs-welcome-blue)](https://github.com/jingyaogong/minimind/pulls)
+[![GitHub last commit](https://img.shields.io/github/last-commit/Ezra-Maker-MAX/minimind)](https://github.com/Ezra-Maker-MAX/minimind/commits/master)
+[![GitHub pull request](https://img.shields.io/badge/PRs-welcome-blue)](https://github.com/Ezra-Maker-MAX/minimind/pulls)
 [![Collection](https://img.shields.io/badge/🤗-MiniMind%20%20Collection-blue)](https://huggingface.co/collections/jingyaogong/minimind-66caf8d999f5c7fa64f399e5)
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Ezra-Maker-MAX/minimind/blob/master/minimind_colab.ipynb)
+
+</div>
+
+<div align="center">
+
+🔀 本仓库是 [**jingyaogong/minimind**](https://github.com/jingyaogong/minimind) 的 fork，
+额外维护了一份 **Colab 开箱即用 Notebook**（免费层 T4 实测通过）。
+训练与推理代码与上游保持一致，可放心抄作业。
 
 </div>
 
@@ -269,9 +277,14 @@ minimind2系列旧模型均经过权重映射+（微调训练）QKVO线性层校
 
 ## 第0步
 
+> ☁️ **没有本地显卡？** 直接用上方 `Open In Colab` 按钮（或见「📌 快速开始」），
+> 免费 T4 GPU 即可从零训出 64M 模型，无需配置环境。细节见 [COLAB.md](./COLAB.md)。
+>
+> 本仓库为 fork，上游原仓库 👉 [jingyaogong/minimind](https://github.com/jingyaogong/minimind)
+
 ```bash
 # 克隆仓库、安装依赖
-git clone --depth 1 https://github.com/jingyaogong/minimind
+git clone --depth 1 https://github.com/Ezra-Maker-MAX/minimind
 cd minimind && pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
 ```
 
