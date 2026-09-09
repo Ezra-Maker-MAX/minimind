@@ -12,6 +12,7 @@
 [![GitHub last commit](https://img.shields.io/github/last-commit/jingyaogong/minimind)](https://github.com/jingyaogong/minimind/commits/master)
 [![GitHub pull request](https://img.shields.io/badge/PRs-welcome-blue)](https://github.com/jingyaogong/minimind/pulls)
 [![Collection](https://img.shields.io/badge/🤗-MiniMind%20%20Collection-blue)](https://huggingface.co/collections/jingyaogong/minimind-66caf8d999f5c7fa64f399e5)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Ezra-Maker-MAX/minimind/blob/master/minimind_colab.ipynb)
 
 </div>
 
@@ -210,6 +211,48 @@ minimind2系列旧模型均经过权重映射+（微调训练）QKVO线性层校
 ---
 
 # 📌 快速开始
+
+<div align="center">
+
+### ☁️ 没有 GPU？点这里直接在 Colab 上训练
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Ezra-Maker-MAX/minimind/blob/master/minimind_colab.ipynb)
+
+**打开 → 选 T4 GPU → 从上往下依次运行**，即可从零训出 64M 的 MiniMind。
+不需要本地显卡，也不需要配环境。
+
+</div>
+
+> 本 fork 额外维护了一份 Colab 开箱即用 Notebook（免费层 T4 实测通过），
+> 已自动规避下面三个坑。完整细节见 [COLAB.md](./COLAB.md)。
+
+**三步开跑**
+
+1. 点上方 `Open in Colab` 按钮
+2. 菜单 **修改 → 笔记本设置 → 硬件加速器 → T4 GPU** → 保存
+3. 依次运行每个 cell —— 第一个 cell 会自检 GPU 并自动选择 `float16` / `bfloat16`
+
+**Colab 上必踩的三个坑（Notebook 已帮你绕开）**
+
+| 坑 | 后果 | Notebook 的处理 |
+|---|---|---|
+| `pip install -r requirements.txt` | `numpy==1.26.4` 没有 Python 3.13 的 wheel，pip 依赖回溯会**把 kernel 占死** | 只装训练必需子集 |
+| 训练默认 `--dtype bfloat16` | T4（sm_75）没有 bf16 硬件支持，严重掉速 | 按 GPU 架构自动切 `float16` |
+| 产物留在 `/content` | 实例一释放全丢；且 `checkpoints/` 路径在源码里硬编码，`--save_dir` 管不到 | 项目整体放 Google Drive，天然持久 + 断点续训 |
+
+**时长预期**（免费层 T4，约为 3090 的 40~50% 算力）
+
+| 阶段 | 数据 | 预估 |
+|---|---|---|
+| Pretrain | `pretrain_t2t_mini` 1.2GB | ≈ 2.5~3 小时 / epoch |
+| SFT | `sft_t2t_mini` 1.6GB | ≈ 2.5~3 小时 / epoch |
+
+一次会话通常跑不完全程。Notebook 已开启 `--from_resume 1`：
+中断后重跑同一条命令即可接着训，权重和断点状态都在 Drive 里。
+
+完整踩坑记录、目录规划、排障表见 👉 [COLAB.md](./COLAB.md)
+
+---
 
 <details>
 <summary>本人的软硬件配置（供参考）</summary>
