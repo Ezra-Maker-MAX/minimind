@@ -11,10 +11,18 @@ colab_runner.py — 通过本地 colab-mcp 驱动 Colab 自动跑流水线
 
 用法：
   python colab_runner.py smoke      # 环境体检 + 装依赖 + clone + 小样本跑通一步
-  python colab_runner.py pretrain   # 后台启动预训练 + 持续轮询日志
-  python colab_runner.py sft        # 后台启动 SFT + 持续轮询日志
+  python colab_runner.py pretrain   # P1 后台启动预训练 + 持续轮询日志
+  python colab_runner.py sft        # P1 后台启动 SFT + 持续轮询日志
+  python colab_runner.py dpo        # P2 对齐（DPO，无需 reward model）
+  python colab_runner.py lora --lora-name lora_medical   # P3 LoRA 定制
   python colab_runner.py status     # 只看训练日志和产出，不启动新任务
   python colab_runner.py exec --file step.py   # 执行自定义脚本
+
+提速：任何训练命令追加 --use-compile 1 可开启 torch.compile
+     （T4 算力仅 3090 的 40~50%，pretrain 两万+ step 收益明显；
+       注意首次 step 有 2~5 分钟编译开销）
+
+数据组合：mini=2.98GB(P1) / full=22.4GB(免费Drive装不下) / p2=178MB(对齐) / p3=59MB(LoRA)
 
 约定：
   - 项目常驻 Google Drive：/content/drive/MyDrive/minimind
@@ -243,9 +251,17 @@ print('>>> dtype =', DTYPE)
 
 INSTALL = r"""
 # 只装训练必需项；绝不能 pip install -r requirements.txt（numpy==1.26.4 在 py3.13 无 wheel）
-!pip -q install "numpy>=2.1" datasets transformers einops rich huggingface_hub
+# 清单由 requirements.txt + 逐个 grep 训练脚本 import 核对得出，比"只装 6 个包"稳妥
+!pip -q install "numpy>=2.1" datasets transformers einops rich huggingface_hub \
+    jsonlines datasketch simhash psutil jieba nltk scikit_learn trl wandb swanlab
 import numpy, datasets, transformers
 print('numpy', numpy.__version__, '| datasets', datasets.__version__, '| transformers', transformers.__version__)
+# 逐个验证训练脚本真正 import 的包，避免跑到一半才崩
+for _m in ['rich', 'jsonlines', 'psutil', 'einops', 'wandb', 'trl']:
+    try:
+        __import__(_m); print('  ok  ', _m)
+    except Exception as _e:
+        print('  MISS', _m, _e)
 """
 
 MOUNT_AND_CLONE = r"""
@@ -293,12 +309,19 @@ print('exit:', p.poll())
 print(open('/content/smoke.log').read()[-3000:])
 """
 
-# 数据集体积（README 标称）：mini 组合 2.8GB；完整版 pretrain 10GB + sft 14GB = 24GB
+# 数据集体积（2026-09 实测真实大小，非 README 标称）
+#   mini 组合 2.98GB；完整版 22.4GB（免费 Drive 15GB 装不下）；P2+P3 合计仅 236MB
 DATA_SETS = {
-    "mini": ["pretrain_t2t_mini.jsonl", "sft_t2t_mini.jsonl"],          # ~2.8GB
-    "full": ["pretrain_t2t.jsonl", "sft_t2t.jsonl"],                    # ~24GB
-    "rl":   ["dpo.jsonl", "rlaif.jsonl"],                                # ~77MB
+    "mini": ["pretrain_t2t_mini.jsonl", "sft_t2t_mini.jsonl"],            # 2.98GB  P1 基座
+    "full": ["pretrain_t2t.jsonl", "sft_t2t.jsonl"],                      # 22.4GB  装不下
+    "p2":   ["dpo.jsonl", "rlaif.jsonl", "agent_rl.jsonl",
+             "agent_rl_math.jsonl"],                                      # 178MB   P2 对齐
+    "p3":   ["lora_medical.jsonl", "lora_identity.jsonl",
+             "lora_exam.jsonl"],                                          # 59MB    P3 定制
+    "rl":   ["dpo.jsonl", "rlaif.jsonl"],                                 # 77MB    兼容旧名
 }
+# 各组合预估占用（GB），用于 Drive 空间检查
+DATA_SIZE = {"mini": 2.98, "full": 22.4, "p2": 0.18, "p3": 0.06, "rl": 0.08}
 LOCAL_DATA = "/content/minimind/dataset"   # VM 本地盘：训练实际读取处，速度快
 
 PREPARE_DATA = r"""
@@ -317,11 +340,11 @@ print('Drive 剩余空间: %.1f GB' % free_gb('/content/drive'))
 print('本地盘剩余空间: %.1f GB' % free_gb('/content'))
 
 files = FILES_PLACEHOLDER
-need = {'mini': 2.8, 'full': 24.0}.get('SET_PLACEHOLDER', 2.8)
-print('本次需要约 %.1f GB' % need)
+need = DATA_SIZE_PLACEHOLDER
+print('本次需要约 %.2f GB' % need)
 if free_gb('/content/drive') < need + 1:
-    raise SystemExit('Drive 空间不足！完整版 24GB 超过免费 Drive 15GB，'
-                     '请改用 mini 组合，或清理 Drive / 升级存储')
+    raise SystemExit('Drive 空间不足！完整版 22.4GB 超过免费 Drive 15GB，'
+                     '请改用 mini / p2 / p3 组合，或清理 Drive / 升级存储')
 
 for fn in files:
     dst = os.path.join(DD, fn)
@@ -356,8 +379,9 @@ for fn in FILES_PLACEHOLDER:
 """
 
 
-def train_launch(script, data, batch, accum, epochs=1):
+def train_launch(script, data, batch, accum, epochs=1, use_compile=0, extra=""):
     """生成后台启动训练的 cell 代码（nohup 式，配合日志轮询）。"""
+    comp = " --use_compile 1" if use_compile else ""
     return f"""
 import subprocess, os, time
 proj = '{PROJ}'
@@ -371,16 +395,18 @@ else:
     cmd = (f'cd {{proj}}/trainer && python {script} --epochs {epochs} '
            f'--batch_size {batch} --accumulation_steps {accum} --num_workers 2 '
            f'--dtype DTYPE_PLACEHOLDER --data_path {LOCAL_DATA}/{data} '
-           f'--log_interval 50 --save_interval 500 --from_resume 1')
+           f'--log_interval 50 --save_interval 500 --from_resume 1{comp}EXTRA_PLACEHOLDER')
     # 把启动命令存 Drive：新会话可直接复用，保证 --from_resume 参数一致
     os.makedirs(proj + '/logs', exist_ok=True)
     open(proj + '/logs/last_cmd.sh','w').write('#!/bin/bash\\n' + cmd + '\\n')
     subprocess.Popen(['bash','-lc', cmd], stdout=open(log,'w'),
                      stderr=subprocess.STDOUT, start_new_session=True)
     print('已后台启动:', cmd)
+    if {use_compile}:
+        print('NOTE: 已开启 --use_compile，首次 step 需 2~5 分钟编译，属正常')
 time.sleep(20)
 print(open(log).read()[-2000:] if os.path.exists(log) else '(日志还没生成)')
-"""
+""".replace("EXTRA_PLACEHOLDER", (" " + extra if extra else ""))
 
 TAIL = r"""
 import os, shutil
@@ -413,9 +439,11 @@ for d in ['checkpoints', 'out', 'logs']:
 # ────────────────────────────── 命令实现 ──────────────────────────────
 def _fill(code, data_set="mini"):
     files = repr(DATA_SETS.get(data_set, DATA_SETS["mini"]))
+    need = DATA_SIZE.get(data_set, 2.98)
     return (code.replace("REPO_URL", REPO)
                 .replace("LOCAL_DATA_PLACEHOLDER", LOCAL_DATA)
                 .replace("FILES_PLACEHOLDER", files)
+                .replace("DATA_SIZE_PLACEHOLDER", repr(need))
                 .replace("SET_PLACEHOLDER", data_set)
                 .replace("PROJ", PROJ)
                 .replace("LOGPATH", LOG))
@@ -445,18 +473,32 @@ def cmd_train(args):
     c.exec_code(_fill(INSTALL), timeout=900, tag="装依赖")
     c.exec_code(_fill(MOUNT_AND_CLONE), timeout=600, tag="挂 Drive + clone")
     c.exec_code(ENV_CHECK, timeout=120, tag="环境体检")
-    if args.stage == "pretrain":
+
+    stage = args.stage
+    extra = ""
+    if stage == "pretrain":
         script, data, bs, ac = "train_pretrain.py", DATA_SETS[args.data][0], 16, 8
-    else:
+    elif stage == "sft":
         script, data, bs, ac = "train_full_sft.py", DATA_SETS[args.data][1], 8, 2
+    elif stage == "dpo":
+        # DPO 不需要 reward model，直接可跑
+        script, data, bs, ac = "train_dpo.py", "dpo.jsonl", 4, 2
+        extra = "--from_weight full_sft"
+    elif stage == "lora":
+        script, data, bs, ac = "train_lora.py", f"{args.lora_name}.jsonl", 16, 1
+        extra = f"--lora_name {args.lora_name} --from_weight full_sft"
+    else:
+        raise SystemExit(f"未知阶段: {stage}")
+
     if not args.skip_prepare:
         c.exec_code(_fill(PREPARE_DATA, args.data), timeout=3600,
                     tag=f"数据集({args.data})灌入 Drive")
     c.exec_code(_fill(SYNC_DATA, args.data), timeout=1800, tag="同步到 VM 本地盘")
-    code = train_launch(script, data, bs, ac, args.epochs)
+    code = train_launch(script, data, bs, ac, args.epochs,
+                        use_compile=args.use_compile, extra=extra)
     # dtype 由环境体检写入全局 DTYPE；这里用 python 变量拼接，避免硬编码
     code = code.replace("DTYPE_PLACEHOLDER", "' + DTYPE + '")
-    c.exec_code(_fill(code), timeout=600, tag=f"启动 {args.stage}")
+    c.exec_code(_fill(code, args.data), timeout=600, tag=f"启动 {stage}")
     if args.watch:
         poll(c, args.watch)
 
@@ -503,12 +545,18 @@ def poll(c, minutes):
 
 def main():
     ap = argparse.ArgumentParser(description="colab_runner — 自动驱动 Colab 跑流水线")
-    ap.add_argument("cmd", choices=["smoke", "prepare", "pretrain", "sft", "status", "exec"])
+    ap.add_argument("cmd", choices=["smoke", "prepare", "pretrain", "sft", "dpo", "lora",
+                                    "status", "exec"])
     ap.add_argument("--handshake", type=int, default=150, help="握手等待秒数(默认150)")
     ap.add_argument("--watch", type=int, default=0, help="启动后轮询日志的分钟数")
     ap.add_argument("--epochs", type=int, default=1, help="训练 epoch 数")
-    ap.add_argument("--data", choices=["mini", "full", "rl"], default="mini",
-                    help="数据组合：mini=2.8GB(推荐) / full=24GB(免费Drive放不下) / rl=77MB")
+    ap.add_argument("--data", choices=["mini", "full", "p2", "p3", "rl"], default="mini",
+                    help="数据组合：mini=2.98GB(P1) / full=22.4GB(装不下) / "
+                         "p2=178MB(对齐) / p3=59MB(LoRA) / rl=77MB(兼容)")
+    ap.add_argument("--use-compile", type=int, default=0, choices=[0, 1],
+                    help="开启 torch.compile 提速（首次 step 需 2~5 分钟编译）")
+    ap.add_argument("--lora-name", default="lora_medical",
+                    help="LoRA 权重名：lora_medical / lora_identity")
     ap.add_argument("--skip-data", action="store_true", help="跳过数据集下载")
     ap.add_argument("--skip-prepare", action="store_true",
                     help="跳过数据下载(Drive 里已有)，只做 Drive→本地盘同步")
@@ -520,8 +568,10 @@ def main():
         cmd_smoke(a)
     elif a.cmd == "prepare":
         cmd_prepare(a)
-    elif a.cmd in ("pretrain", "sft"):
+    elif a.cmd in ("pretrain", "sft", "dpo", "lora"):
         a.stage = a.cmd
+        if a.cmd in ("dpo", "lora") and a.data == "mini":
+            a.data = "p2" if a.cmd == "dpo" else "p3"   # 自动纠正默认数据集
         cmd_train(a)
     elif a.cmd == "status":
         cmd_status(a)
